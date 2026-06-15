@@ -182,14 +182,14 @@ public struct Sweeper: Sendable {
                                 return oldView
                             }
                             if let guide = item as? UILayoutGuide {
-                                if guide.owningView === newView {
-                                    if guide === newView.safeAreaLayoutGuide {
+                                if guide.owningView === newView || guide.owningView == nil {
+                                    if guide.identifier == "UIViewSafeAreaLayoutGuide" {
                                         return oldView.safeAreaLayoutGuide
                                     }
-                                    if guide === newView.layoutMarginsGuide {
+                                    if guide.identifier == "UIViewLayoutMarginsLayoutGuide" {
                                         return oldView.layoutMarginsGuide
                                     }
-                                    if guide === newView.readableContentGuide {
+                                    if guide.identifier == "UIViewReadableContentLayoutGuide" {
                                         return oldView.readableContentGuide
                                     }
                                     return oldView.layoutGuides.first { $0.identifier == guide.identifier } ?? oldView.safeAreaLayoutGuide
