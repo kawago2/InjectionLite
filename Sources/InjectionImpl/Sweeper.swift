@@ -241,11 +241,33 @@ public struct Sweeper: Sendable {
                         }
                         print("InjectionLite: [DEBUG] Moved \(subviews.count) subviews to oldView")
                         
-                        // Apply the pre-captured constraints
-                        for nc in remappedConstraints {
-                            oldView.addConstraint(nc)
+                        // Apply the pre-captured constraints (only if items are descendants of oldView to prevent crashes)
+                        func isDescendant(_ item: AnyObject?, of ancestor: UIView) -> Bool {
+                            guard let item = item else { return true }
+                            if item === ancestor {
+                                return true
+                            }
+                            if let view = item as? UIView {
+                                return view.isDescendant(of: ancestor)
+                            }
+                            if let guide = item as? UILayoutGuide {
+                                if let owningView = guide.owningView {
+                                    return owningView.isDescendant(of: ancestor) || owningView === ancestor
+                                }
+                            }
+                            return false
                         }
-                        print("InjectionLite: [DEBUG] Applied \(remappedConstraints.count) constraints to oldView")
+
+                        var appliedCount = 0
+                        for nc in remappedConstraints {
+                            if isDescendant(nc.firstItem, of: oldView) && isDescendant(nc.secondItem, of: oldView) {
+                                oldView.addConstraint(nc)
+                                appliedCount += 1
+                            } else {
+                                print("InjectionLite: [WARNING] Skipping constraint \(nc) because its items are not descendants of oldView")
+                            }
+                        }
+                        print("InjectionLite: [DEBUG] Applied \(appliedCount) of \(remappedConstraints.count) constraints to oldView")
                     } else {
                         vc.view = newView
                     }
