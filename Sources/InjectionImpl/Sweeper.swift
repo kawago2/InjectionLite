@@ -15,6 +15,9 @@ import Foundation
 import InjectionImplC
 import DLKitD
 #endif
+#if os(iOS) || os(tvOS)
+import UIKit
+#endif
 
 @objc public protocol SwiftInjected {
     @objc optional func injected()
@@ -82,6 +85,7 @@ public struct Sweeper: Sendable {
         }
         /// Instance level injected() methods...
         var injectedClasses = [AnyClass]()
+        var viewControllersToReload = [AnyClass]()
         for cls in oldClasses {
             if class_getInstanceMethod(cls, Self.injectedSEL) != nil {
                 injectedClasses.append(cls)
@@ -101,35 +105,48 @@ public struct Sweeper: Sendable {
                 if let kvoCls = NSClassFromString(kvoName) {
                     injectedClasses.append(kvoCls)
                 }
+            } else {
+                #if os(iOS) || os(tvOS)
+                if let UIViewController = objc_getClass("UIViewController") as? AnyClass,
+                   Self.isSubclass(cls, of: UIViewController) {
+                    viewControllersToReload.append(cls)
+                }
+                #endif
             }
         }
 
         // implement -injected() method using sweep of objects in application
-        if !injectedClasses.isEmpty || !injectedGenerics.isEmpty {
-            log("Starting sweep \(injectedClasses), \(injectedGenerics)...")
+        if !injectedClasses.isEmpty || !viewControllersToReload.isEmpty || !injectedGenerics.isEmpty {
+            log("Starting sweep \(injectedClasses), \(viewControllersToReload), \(injectedGenerics)...")
             var patched = Set<UnsafeRawPointer>()
             SwiftSweeper(instanceTask: {
                 (instance: AnyObject) in
-                if let instanceClass = object_getClass(instance),
-                   injectedClasses.contains(where: {
+                if let instanceClass = object_getClass(instance) {
+                    if injectedClasses.contains(where: {
                        $0 == instanceClass || $0 === instanceClass }) ||
                     !injectedGenerics.isEmpty &&
                     self.patchGenerics(oldClass: instanceClass, image: image,
                         injectedGenerics: injectedGenerics, patched: &patched) {
-                    let proto = unsafeBitCast(instance, to: SwiftInjected.self)
-//                    if SwiftEval.sharedInstance().vaccineEnabled {
-//                        performVaccineInjection(instance)
-//                        proto.injected?()
-//                        return
-//                    }
-
-                    proto.injected?()
-
-//                    #if os(iOS) || os(tvOS)
-//                    if let vc = instance as? UIViewController {
-//                        flash(vc: vc)
-//                    }
-//                    #endif
+                        let proto = unsafeBitCast(instance, to: SwiftInjected.self)
+                        proto.injected?()
+                    } else if viewControllersToReload.contains(where: {
+                        $0 == instanceClass || $0 === instanceClass }) {
+                        #if os(iOS) || os(tvOS)
+                        if let vc = instance as? UIViewController {
+                            let nibName = vc.nibName ?? String(describing: type(of: vc))
+                            let bundle = Bundle(for: type(of: vc))
+                            if bundle.path(forResource: nibName, ofType: "nib") != nil {
+                                if let newView = UINib(nibName: nibName, bundle: bundle)
+                                    .instantiate(withOwner: vc, options: nil).first as? UIView {
+                                    newView.frame = vc.view.frame
+                                    vc.view = newView
+                                    vc.viewDidLoad()
+                                    print("InjectionLite: Automatically reloaded view for \(type(of: vc)) from NIB")
+                                }
+                            }
+                        }
+                        #endif
+                    }
                 }
             }).sweepValue(SwiftSweeper.seeds)
         }
