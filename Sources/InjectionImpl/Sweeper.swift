@@ -138,9 +138,29 @@ public struct Sweeper: Sendable {
                             if bundle.path(forResource: nibName, ofType: "nib") != nil {
                                 if let newView = UINib(nibName: nibName, bundle: bundle)
                                     .instantiate(withOwner: vc, options: nil).first as? UIView {
-                                    newView.frame = vc.view.frame
+                                    let oldView = vc.view
+                                    newView.frame = oldView?.frame ?? .zero
+                                    newView.autoresizingMask = oldView?.autoresizingMask ?? []
+                                    
+                                    if let superview = oldView?.superview {
+                                        if let stackView = superview as? UIStackView {
+                                            if let index = stackView.arrangedSubviews.firstIndex(of: oldView!) {
+                                                stackView.removeArrangedSubview(oldView!)
+                                                oldView!.removeFromSuperview()
+                                                stackView.insertArrangedSubview(newView, at: index)
+                                            }
+                                        } else {
+                                            if let index = superview.subviews.firstIndex(of: oldView!) {
+                                                oldView!.removeFromSuperview()
+                                                superview.insertSubview(newView, at: index)
+                                            }
+                                        }
+                                    }
+                                    
                                     vc.view = newView
                                     vc.viewDidLoad()
+                                    vc.view.setNeedsLayout()
+                                    vc.view.layoutIfNeeded()
                                     print("InjectionLite: Automatically reloaded view for \(type(of: vc)) from NIB")
                                 }
                             }
