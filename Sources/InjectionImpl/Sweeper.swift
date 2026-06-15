@@ -161,19 +161,42 @@ public struct Sweeper: Sendable {
     }
 
     #if os(iOS) || os(tvOS)
+    /// Reload a view controller's view from its updated NIB on disk.
+    ///
+    /// Strategy: **full view replacement** — replace `vc.view` entirely
+    /// with the freshly-loaded view.  This is fundamentally safer than the
+    /// previous "surgical swap" (move subviews + remap constraints) because:
+    ///
+    ///  1. `UINib.instantiate(withOwner: vc)` connects **all** IBOutlets on the
+    ///     VC (including the `view` outlet itself) to objects inside the new view.
+    ///     If we keep the old root view, those outlets dangle → nil crashes.
+    ///
+    ///  2. Internal constraints referencing system layout guides
+    ///     (safeAreaLayoutGuide etc.) are set up correctly by UINib.
+    ///     Remapping them manually is fragile and loses guide ownership.
+    ///
+    ///  3. The only constraints we need to recreate are the **superview's**
+    ///     constraints that pin `oldView` into its container (navigation
+    ///     controller content view, tab bar controller, etc.).
     func reloadViewControllerView(vc: UIViewController, nibName: String, bundle: Bundle) {
         guard let nibPath = bundle.path(forResource: nibName, ofType: "nib") else {
             print("InjectionLite: [DEBUG] NIB not found for '\(nibName)' in bundle \(bundle.bundlePath)")
             return
         }
-        let nibURL = URL(fileURLWithPath: nibPath)
-        print("InjectionLite: [DEBUG] nibPath = \(nibPath)")
-        print("InjectionLite: [DEBUG] bundle = \(bundle.bundlePath)")
-        guard let nibData = try? Data(contentsOf: nibURL) else {
+        guard let nibData = try? Data(contentsOf: URL(fileURLWithPath: nibPath)) else {
             print("InjectionLite: [DEBUG] Failed to read NIB data from \(nibPath)")
             return
         }
+        print("InjectionLite: [DEBUG] nibPath = \(nibPath)")
+        print("InjectionLite: [DEBUG] bundle = \(bundle.bundlePath)")
         print("InjectionLite: [DEBUG] Loaded NIB data: \(nibData.count) bytes")
+
+        // ⚠️  CRITICAL: save reference to the currently-displayed view BEFORE
+        // calling instantiate(withOwner:).  UINib may set vc.view = newView
+        // via the XIB's "view" outlet connection, which would make vc.view
+        // point to the new (off-screen) view.
+        let oldView = vc.view
+
         guard let newView = UINib(data: nibData, bundle: bundle)
             .instantiate(withOwner: vc, options: nil).first as? UIView else {
             print("InjectionLite: [DEBUG] UINib instantiation returned no UIView")
@@ -181,115 +204,88 @@ public struct Sweeper: Sendable {
         }
         print("InjectionLite: [DEBUG] newView created: \(newView.subviews.count) subviews, \(newView.constraints.count) constraints")
 
-        guard let oldView = vc.view else {
-            // No existing view – just assign
-            vc.view = newView
+        // ── Fast path: no existing view to replace ──
+        guard let oldView = oldView, oldView !== newView else {
+            if vc.view !== newView { vc.view = newView }
             vc.viewDidLoad()
+            print("InjectionLite: Reloaded \(type(of: vc)) from NIB (fresh)")
             return
         }
 
-        // MARK: Step 1 – Remap constraints from newView's coordinate space to oldView's.
-        //
-        // We do this BEFORE moving subviews because UIKit removes constraints
-        // from newView the moment a subview is reparented.
-        //
-        // Key insight: constraints that reference system layout guides
-        // (safeAreaLayoutGuide, layoutMarginsGuide, etc.) must be activated
-        // via NSLayoutConstraint.activate() — NOT addConstraint() — because
-        // addConstraint() requires the caller to be the common ancestor view,
-        // which may not hold for guide-based constraints. activate() resolves
-        // the common ancestor automatically.
+        // ── Capture superview hierarchy info ──
+        let superview = oldView.superview
+        let frame = oldView.frame
+        let bounds = oldView.bounds
+        let autoresizingMask = oldView.autoresizingMask
+        let translatesARM = oldView.translatesAutoresizingMaskIntoConstraints
+        let insertionIndex = superview?.subviews.firstIndex(of: oldView)
 
-        func remapItem(_ item: AnyObject?) -> AnyObject? {
-            if item === newView { return oldView }
-            if let guide = item as? UILayoutGuide,
-               guide.owningView === newView || guide.owningView == nil {
-                switch guide.identifier {
-                case "UIViewSafeAreaLayoutGuide":       return oldView.safeAreaLayoutGuide
-                case "UIViewLayoutMarginsLayoutGuide":  return oldView.layoutMarginsGuide
-                case "UIViewReadableContentLayoutGuide":return oldView.readableContentGuide
-                default:
-                    return oldView.layoutGuides.first { $0.identifier == guide.identifier }
-                        ?? oldView.safeAreaLayoutGuide
-                }
+        // Capture superview constraints that pin oldView into its container.
+        // These are the ONLY constraints we need to recreate — everything
+        // internal to newView is already set up by UINib.
+        var superviewConstraints = [NSLayoutConstraint]()
+        if let sv = superview {
+            for c in sv.constraints
+                where c.firstItem === oldView || c.secondItem === oldView {
+                superviewConstraints.append(c)
             }
-            return item
+            print("InjectionLite: [DEBUG] Found \(superviewConstraints.count) superview constraints referencing oldView")
         }
 
-        var remappedConstraints = [NSLayoutConstraint]()
-        for constraint in newView.constraints {
-            let first  = remapItem(constraint.firstItem)
-            let second = remapItem(constraint.secondItem)
-            let nc = NSLayoutConstraint(
-                item:       first  as Any,
-                attribute:  constraint.firstAttribute,
-                relatedBy:  constraint.relation,
-                toItem:     second,
-                attribute:  constraint.secondAttribute,
-                multiplier: constraint.multiplier,
-                constant:   constraint.constant
-            )
-            nc.priority   = constraint.priority
-            nc.identifier = constraint.identifier
-            remappedConstraints.append(nc)
-        }
-        print("InjectionLite: [DEBUG] Captured \(remappedConstraints.count) constraints from newView")
+        // ── Detach old view ──
+        oldView.removeFromSuperview()
 
-        // MARK: Step 2 – Clear old view content
-        oldView.removeConstraints(oldView.constraints)
-        oldView.subviews.forEach { $0.removeFromSuperview() }
-        print("InjectionLite: [DEBUG] Cleared old subviews and constraints")
+        // ── Configure new view with the old view's frame / position ──
+        newView.frame = frame
+        newView.bounds = bounds
+        newView.autoresizingMask = autoresizingMask
+        newView.translatesAutoresizingMaskIntoConstraints = translatesARM
 
-        // MARK: Step 3 – Copy visual properties
-        oldView.backgroundColor                   = newView.backgroundColor
-        oldView.alpha                             = newView.alpha
-        oldView.isHidden                          = newView.isHidden
-        oldView.clipsToBounds                     = newView.clipsToBounds
-        oldView.tintColor                         = newView.tintColor
-        oldView.layoutMargins                     = newView.layoutMargins
-        oldView.directionalLayoutMargins          = newView.directionalLayoutMargins
-        oldView.preservesSuperviewLayoutMargins   = newView.preservesSuperviewLayoutMargins
-        oldView.insetsLayoutMarginsFromSafeArea   = newView.insetsLayoutMarginsFromSafeArea
-
-        // MARK: Step 4 – Reparent subviews into oldView
-        let subviews = Array(newView.subviews)   // snapshot before mutation
-        subviews.forEach { oldView.addSubview($0) }
-        print("InjectionLite: [DEBUG] Moved \(subviews.count) subviews to oldView")
-
-        // MARK: Step 5 – Validate and activate constraints
-        //
-        // A constraint is safe to activate only when both items belong to
-        // oldView's hierarchy. For UILayoutGuide items, check owningView.
-        func isValidItem(_ item: AnyObject?) -> Bool {
-            guard let item = item else { return true }           // nil second item = ok
-            if item === oldView { return true }
-            if let view = item as? UIView {
-                return view.isDescendant(of: oldView)
-            }
-            if let guide = item as? UILayoutGuide {
-                // After remap, owningView should be oldView or one of its descendants
-                guard let owner = guide.owningView else { return false }
-                return owner === oldView || owner.isDescendant(of: oldView)
-            }
-            return false
+        // ── Set vc.view (may already have been set by instantiate) ──
+        if vc.view !== newView {
+            vc.view = newView
         }
 
-        var toActivate = [NSLayoutConstraint]()
-        for nc in remappedConstraints {
-            if isValidItem(nc.firstItem) && isValidItem(nc.secondItem) {
-                toActivate.append(nc)
+        // ── Re-insert into the superview hierarchy at the same position ──
+        if let sv = superview {
+            if let idx = insertionIndex, idx <= sv.subviews.count {
+                sv.insertSubview(newView, at: idx)
             } else {
-                print("InjectionLite: [WARNING] Skipping constraint – items not in oldView hierarchy: \(nc)")
+                sv.addSubview(newView)
+            }
+
+            // Recreate superview constraints, replacing oldView → newView.
+            var recreated = [NSLayoutConstraint]()
+            for c in superviewConstraints {
+                let first: AnyObject  = c.firstItem  === oldView ? newView : c.firstItem!
+                let second: AnyObject? = {
+                    guard let s = c.secondItem else { return nil }
+                    return s === oldView ? newView : s
+                }()
+                let nc = NSLayoutConstraint(
+                    item:       first,
+                    attribute:  c.firstAttribute,
+                    relatedBy:  c.relation,
+                    toItem:     second,
+                    attribute:  c.secondAttribute,
+                    multiplier: c.multiplier,
+                    constant:   c.constant
+                )
+                nc.priority   = c.priority
+                nc.identifier = c.identifier
+                recreated.append(nc)
+            }
+            if !recreated.isEmpty {
+                NSLayoutConstraint.activate(recreated)
+                print("InjectionLite: [DEBUG] Recreated \(recreated.count) superview constraints")
             }
         }
-        NSLayoutConstraint.activate(toActivate)
-        print("InjectionLite: [DEBUG] Activated \(toActivate.count)/\(remappedConstraints.count) constraints")
 
-        // MARK: Step 6 – Notify and relayout
+        // ── Re-run lifecycle & layout ──
         vc.viewDidLoad()
-        oldView.setNeedsLayout()
-        oldView.layoutIfNeeded()
-        print("InjectionLite: Automatically reloaded view for \(type(of: vc)) from NIB")
+        newView.setNeedsLayout()
+        newView.layoutIfNeeded()
+        print("InjectionLite: Reloaded \(type(of: vc)) from NIB")
     }
     #endif
 
