@@ -221,6 +221,29 @@ public struct Sweeper: Sendable {
         }
     }
 
+    public func sweepAndReloadXIB(nibName: String) {
+        DispatchQueue.main.async {
+            log("Starting sweep to reload XIB: \(nibName)")
+            SwiftSweeper(instanceTask: { (instance: AnyObject) in
+                #if os(iOS) || os(tvOS)
+                if let vc = instance as? UIViewController {
+                    let vcNibName = vc.nibName ?? String(describing: type(of: vc))
+                    if vcNibName == nibName || vcNibName == nibName.replacingOccurrences(of: ".nib", with: "") {
+                        let bundle = Bundle(for: type(of: vc))
+                        if let newView = UINib(nibName: vcNibName, bundle: bundle)
+                            .instantiate(withOwner: vc, options: nil).first as? UIView {
+                            newView.frame = vc.view.frame
+                            vc.view = newView
+                            vc.viewDidLoad()
+                            print("InjectionLite: Automatically reloaded view for \(type(of: vc)) from NIB (XIB Reload)")
+                        }
+                    }
+                }
+                #endif
+            }).sweepValue(SwiftSweeper.seeds)
+        }
+    }
+
     /// Generics have per-specialisation vtables and crash Objective runtime apis
     func patchGenerics(oldClass: AnyClass, image: ImageSymbols,
                        injectedGenerics: Set<String>,
