@@ -177,10 +177,31 @@ public struct Sweeper: Sendable {
                         // When subviews are removed from newView, UIKit auto-removes
                         // all constraints that reference those subviews.
                         // We must create replacement constraints while items are still valid.
+                        func remapItem(_ item: AnyObject?) -> AnyObject? {
+                            if item === newView {
+                                return oldView
+                            }
+                            if let guide = item as? UILayoutGuide {
+                                if guide.owningView === newView {
+                                    if guide === newView.safeAreaLayoutGuide {
+                                        return oldView.safeAreaLayoutGuide
+                                    }
+                                    if guide === newView.layoutMarginsGuide {
+                                        return oldView.layoutMarginsGuide
+                                    }
+                                    if guide === newView.readableContentGuide {
+                                        return oldView.readableContentGuide
+                                    }
+                                    return oldView.layoutGuides.first { $0.identifier == guide.identifier } ?? oldView.safeAreaLayoutGuide
+                                }
+                            }
+                            return item
+                        }
+
                         var remappedConstraints = [NSLayoutConstraint]()
                         for constraint in newView.constraints {
-                            let firstItem: AnyObject? = (constraint.firstItem === newView) ? oldView : constraint.firstItem
-                            let secondItem: AnyObject? = (constraint.secondItem === newView) ? oldView : constraint.secondItem
+                            let firstItem: AnyObject? = remapItem(constraint.firstItem)
+                            let secondItem: AnyObject? = remapItem(constraint.secondItem)
                             let nc = NSLayoutConstraint(
                                 item: firstItem as Any,
                                 attribute: constraint.firstAttribute,
