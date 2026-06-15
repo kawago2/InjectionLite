@@ -242,7 +242,7 @@ public struct Sweeper: Sendable {
         }
     }
     #endif
-}
+
 
     /// Generics have per-specialisation vtables and crash Objective runtime apis
     func patchGenerics(oldClass: AnyClass, image: ImageSymbols,
